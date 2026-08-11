@@ -1,0 +1,24 @@
+name: MarketPredict Production Probe
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe current production alias
+        shell: bash
+        run: |
+          BASE="https://market-predict-git-main-mographiccode.vercel.app"
+          echo "=== HEALTH ==="
+          curl -L -sS -D /tmp/health.headers -o /tmp/health.body -w 'HTTP=%{http_code}\n' "$BASE/health" || true
+          cat /tmp/health.headers || true
+          cat /tmp/health.body || true
+          echo
+          echo "=== LOGIN ==="
+          curl -L -sS -D /tmp/login.headers -o /tmp/login.body -w 'HTTP=%{http_code}\n' "$BASE/login" || true
+          head -40 /tmp/login.headers || true
+          head -c 1000 /tmp/login.body || true
+          echo
