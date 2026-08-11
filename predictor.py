@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import math
 import gzip
-import tempfile
-import tarfile
+import ctypes
 import warnings as py_warnings
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -12,10 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import lightgbm as lgb
-from catboost import CatBoostClassifier
-from scipy import sparse
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
@@ -97,35 +93,36 @@ class CampaignPredictor:
         self.model_dir = Path(model_dir)
         suite_path = self.model_dir / "portable_suite.json"
         suite_gz = self.model_dir / "portable_suite.json.gz"
-        if not suite_path.exists() and not suite_gz.exists():
-            archive = self.model_dir / "portable_models.tar"
-            if not archive.exists():
-                raise RuntimeError("Portable V5 model archive is missing.")
-            with tarfile.open(archive, "r") as tf:
-                tf.extractall(self.model_dir, filter="data")
         if suite_path.exists():
             self.suite = json.loads(suite_path.read_text(encoding="utf-8"))
-        else:
+        elif suite_gz.exists():
             with gzip.open(suite_gz, "rt", encoding="utf-8") as fh:
                 self.suite = json.load(fh)
+        else:
+            raise RuntimeError("Portable V5 model metadata is missing.")
         self.safety = json.loads((self.model_dir / "inference_safety_schema.json").read_text(encoding="utf-8"))
         self.schema = json.loads((self.model_dir / "app_schema.json").read_text(encoding="utf-8"))
         self.lockbox = json.loads((self.model_dir / "lockbox_results.json").read_text(encoding="utf-8"))
 
         self.models = self.suite["models"]
-        portable_dir = self.model_dir / "native"
+        native_dir = self.model_dir / "native"
         for bundle in self.models.values():
-            lgb_path = portable_dir / bundle["lgb_model_file"]
+            lgb_path = native_dir / bundle["lgb_model_file"]
             if lgb_path.suffix == ".gz":
                 with gzip.open(lgb_path, "rt", encoding="utf-8") as fh:
                     bundle["lgb_model"] = lgb.Booster(model_str=fh.read())
             else:
                 bundle["lgb_model"] = lgb.Booster(model_file=str(lgb_path))
 
-            cat_path = portable_dir / bundle["cat_model_file"]
-            cat = CatBoostClassifier()
-            cat.load_model(str(cat_path))
-            bundle["cat_model"] = cat
+            cat_so = native_dir / (Path(bundle["cat_model_file"]).stem + ".so")
+            if not cat_so.exists():
+                raise RuntimeError(f"Compiled CatBoost runtime is missing: {cat_so.name}")
+            lib = ctypes.CDLL(str(cat_so))
+            fn = lib.cat_predict
+            fn.restype = ctypes.c_double
+            fn.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_char_p)]
+            bundle["cat_library"] = lib
+            bundle["cat_predict_fn"] = fn
         self.objectives = set(self.models)
         self.forbidden = set(self.safety["forbidden_in_prediction"])
         self.required = set(self.schema["required_fields"])
@@ -140,38 +137,58 @@ class CampaignPredictor:
             raise RuntimeError("App schema objective list does not match the frozen model suite.")
 
     @staticmethod
-    def _pred_cat(bundle: dict[str, Any], X: pd.DataFrame) -> np.ndarray:
-        Z = X.copy()
+    def _pred_cat(bundle: dict[str, Any], row: dict[str, Any]) -> float:
+        nums: list[float] = []
         for col in bundle["cat_num_cols"]:
-            Z[col] = pd.to_numeric(Z[col], errors="coerce").fillna(bundle["cat_medians"][col]).astype(float)
+            value = row.get(col)
+            try:
+                f = float(value)
+                if not math.isfinite(f):
+                    raise ValueError
+            except (TypeError, ValueError):
+                f = float(bundle["cat_medians"][col])
+            nums.append(f)
+
+        cats: list[bytes] = []
         for col in bundle["cat_cols"]:
-            Z[col] = Z[col].fillna("__MISSING__").astype(str)
-        return bundle["cat_model"].predict_proba(Z)[:, 1]
+            value = row.get(col)
+            if value is None or (isinstance(value, float) and math.isnan(value)):
+                value = "__MISSING__"
+            cats.append(str(value).encode("utf-8"))
+
+        num_array = (ctypes.c_double * len(nums))(*nums)
+        cat_array = (ctypes.c_char_p * len(cats))(*cats)
+        raw = float(bundle["cat_predict_fn"](num_array, cat_array))
+        if raw >= 0:
+            e = math.exp(-raw)
+            return 1.0 / (1.0 + e)
+        e = math.exp(raw)
+        return e / (1.0 + e)
 
     @staticmethod
-    def _pred_lgb(bundle: dict[str, Any], X: pd.DataFrame) -> np.ndarray:
-        n = len(X)
-        num_parts = []
+    def _pred_lgb(bundle: dict[str, Any], row: dict[str, Any]) -> float:
+        values: list[float] = []
         for col in bundle["lgb_num_cols"]:
-            vals = pd.to_numeric(X[col], errors="coerce").fillna(bundle["lgb_num_medians"][col]).astype(float).to_numpy().reshape(n, 1)
-            num_parts.append(vals)
-        num = np.hstack(num_parts) if num_parts else np.empty((n, 0), dtype=float)
-        cat_blocks = []
+            value = row.get(col)
+            try:
+                f = float(value)
+                if not math.isfinite(f):
+                    raise ValueError
+            except (TypeError, ValueError):
+                f = float(bundle["lgb_num_medians"][col])
+            values.append(f)
+
         for col in bundle["lgb_cat_cols"]:
-            cats = bundle["lgb_cat_categories"][col]
+            categories = bundle["lgb_cat_categories"][col]
             fill = bundle["lgb_cat_fill"][col]
-            vals = X[col].where(X[col].notna(), fill).tolist()
-            index = {str(v): i for i, v in enumerate(cats)}
-            rr, cc = [], []
-            for i, v in enumerate(vals):
-                j = index.get(str(v))
-                if j is not None:
-                    rr.append(i); cc.append(j)
-            data = np.ones(len(rr), dtype=float)
-            cat_blocks.append(sparse.csr_matrix((data, (rr, cc)), shape=(n, len(cats))))
-        parts = [sparse.csr_matrix(num)] + cat_blocks
-        Z = sparse.hstack(parts, format="csr")
-        return np.asarray(bundle["lgb_model"].predict(Z), dtype=float)
+            value = row.get(col)
+            if value is None or (isinstance(value, float) and math.isnan(value)):
+                value = fill
+            text = str(value)
+            values.extend(1.0 if text == str(cat) else 0.0 for cat in categories)
+
+        matrix = np.asarray([values], dtype=np.float64)
+        return float(bundle["lgb_model"].predict(matrix)[0])
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
@@ -204,7 +221,7 @@ class CampaignPredictor:
             a, b = r
         return datetime.strptime(a, "%Y-%m-%d").date(), datetime.strptime(b, "%Y-%m-%d").date()
 
-    def validate_and_build_features(self, payload: dict[str, Any]) -> tuple[str, pd.DataFrame, list[str]]:
+    def validate_and_build_features(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any], list[str]]:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -280,9 +297,9 @@ class CampaignPredictor:
                 continue
             raw = payload.get(feature, None)
             if feature in numeric_model_fields:
-                row[feature] = np.nan if raw in (None, "") else float(raw)
+                row[feature] = math.nan if raw in (None, "") else float(raw)
             else:
-                row[feature] = np.nan if raw in (None, "") else str(raw)
+                row[feature] = math.nan if raw in (None, "") else str(raw)
 
         assert start_date is not None
         row["Start_Month"] = str(start_date.month)
@@ -318,8 +335,7 @@ class CampaignPredictor:
         if float(payload.get("Budget_Adequacy_Score", 100)) < 40:
             warnings.append("الميزانية منخفضة قياسًا بحجم الجمهور والهدف وفق معايرة V5.")
 
-        X = pd.DataFrame([row], columns=model_features)
-        return objective, X, warnings
+        return objective, row, warnings
 
     def _recommendations(self, payload: dict[str, Any], predicted_success: bool) -> list[str]:
         recs: list[str] = []
@@ -344,16 +360,21 @@ class CampaignPredictor:
         return recs[:5]
 
     def predict(self, payload: dict[str, Any]) -> PredictionResult:
-        objective, X, warnings = self.validate_and_build_features(payload)
+        objective, row, warnings = self.validate_and_build_features(payload)
         b = self.models[objective]
 
         with py_warnings.catch_warnings():
-            py_warnings.filterwarnings("ignore", message="X does not have valid feature names.*", category=UserWarning)
-            p_lgb = float(self._pred_lgb(b, X)[0])
-        p_cat = float(self._pred_cat(b, X)[0])
+            py_warnings.filterwarnings("ignore", category=UserWarning)
+            p_lgb = self._pred_lgb(b, row)
+        p_cat = self._pred_cat(b, row)
         raw = b["weight_lgb"] * p_lgb + (1.0 - b["weight_lgb"]) * p_cat
         z = b["calibrator_coef"] * raw + b["calibrator_intercept"]
-        probability = float(1.0 / (1.0 + np.exp(-z)))
+        if z >= 0:
+            ez = math.exp(-z)
+            probability = 1.0 / (1.0 + ez)
+        else:
+            ez = math.exp(z)
+            probability = ez / (1.0 + ez)
         threshold = float(b["threshold"])
         predicted_success = probability >= threshold
         margin = abs(probability - threshold)
