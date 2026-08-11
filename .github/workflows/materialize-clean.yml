@@ -1,0 +1,105 @@
+name: Materialize MarketPredict Clean
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/materialize-clean.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Rebuild exact V5 and export runtime models
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gzip, hashlib, json, joblib, re, shutil, subprocess, sys
+          from pathlib import Path
+          import numpy as np
+
+          ROOT=Path.cwd(); BOOT=ROOT/'bootstrap'; WORK=ROOT/'.v5_materialize'; OUT=ROOT/'models'; NATIVE=OUT/'native'; ML=ROOT/'ml'
+          EXPECTED='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
+          FREEZE='5f3874c8a663d329d7e19876e924f44ee09dd0683ac72dc5a017811e05125792'
+          OBJECTIVES=['Sales','Traffic','Awareness','Lead Generation','Engagement','App Installs']
+
+          generator=gzip.open(BOOT/'generator.py.gz','rt',encoding='utf-8').read()
+          trainer=gzip.open(BOOT/'trainer.py.gz','rt',encoding='utf-8').read()
+          WORK.mkdir(exist_ok=True); OUT.mkdir(exist_ok=True); NATIVE.mkdir(exist_ok=True); ML.mkdir(exist_ok=True)
+          (ML/'generate_saudi_marketing_dataset_v5.py').write_text(generator,encoding='utf-8')
+          (ML/'train_v5_stage1.py').write_text(trainer,encoding='utf-8')
+          (WORK/'generate.py').write_text(generator.replace("out=Path('/mnt/data')",f"out=Path({str(WORK)!r})"),encoding='utf-8')
+          (WORK/'train.py').write_text(trainer.replace("BASE=Path('/mnt/data')",f"BASE=Path({str(WORK)!r})"),encoding='utf-8')
+          subprocess.run([sys.executable,str(WORK/'generate.py')],check=True)
+          pre=WORK/'saudi_marketing_campaigns_v5_prelaunch.csv'
+          got=hashlib.sha256(pre.read_bytes()).hexdigest()
+          if got != EXPECTED: raise RuntimeError(f'V5 dataset SHA mismatch: {got}')
+
+          bundles={}
+          for objective in OBJECTIVES:
+              subprocess.run([sys.executable,str(WORK/'train.py'),objective],check=True)
+              slug=objective.replace(' ','_').lower()
+              bundles[objective]=joblib.load(WORK/f'v5_model_{slug}.joblib')
+
+          def slug(text): return re.sub(r'[^a-z0-9]+','_',text.lower()).strip('_')
+          def jval(x): return x.item() if isinstance(x,np.generic) else x
+          meta={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'lockbox_results_file':'lockbox_results.json','models':{}}
+
+          for obj,b in bundles.items():
+              sl=slug(obj); pipe=b['lgb']; prep=pipe.named_steps['prep']; lgbm=pipe.named_steps['model']; cat=b['cat']['model']
+              lgb_name=f'{sl}_lgb.txt.gz'; cat_name=f'{sl}_cat.cbm'
+              tmp=WORK/f'{sl}_lgb.txt'; lgbm.booster_.save_model(str(tmp))
+              with gzip.open(NATIVE/lgb_name,'wt',encoding='utf-8') as fh: fh.write(tmp.read_text(encoding='utf-8'))
+              cat.save_model(str(NATIVE/cat_name))
+              num_cols=list(prep.transformers_[0][2]); num_imp=prep.transformers_[0][1]
+              cat_cols=list(prep.transformers_[1][2]); cp=prep.transformers_[1][1]; cat_imp=cp.named_steps['imp']; ohe=cp.named_steps['ohe']
+              meta['models'][obj]={
+                  'objective':obj,'features':list(b['features']),'weight_lgb':float(b['weight_lgb']),'threshold':float(b['threshold']),
+                  'calibrator_coef':float(b['calibrator'].coef_[0,0]),'calibrator_intercept':float(b['calibrator'].intercept_[0]),
+                  'lgb_model_file':lgb_name,'lgb_num_cols':num_cols,
+                  'lgb_num_medians':{c:float(v) for c,v in zip(num_cols,num_imp.statistics_)},
+                  'lgb_cat_cols':cat_cols,'lgb_cat_fill':{c:jval(v) for c,v in zip(cat_cols,cat_imp.statistics_)},
+                  'lgb_cat_categories':{c:[jval(v) for v in cats.tolist()] for c,cats in zip(cat_cols,ohe.categories_)},
+                  'cat_model_file':cat_name,'cat_cols':list(b['cat']['cat']),'cat_num_cols':list(b['cat']['num']),
+                  'cat_medians':{k:float(v) for k,v in b['cat']['med'].items()}
+              }
+          (OUT/'portable_suite.json').write_text(json.dumps(meta,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+
+          # Keep a single archival suite too, for academic reproducibility.
+          joblib.dump({'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'models':bundles,'lockbox_results_file':'lockbox_results.json'},OUT/'model_suite.joblib',compress=3)
+
+          forbidden=['Spend_SAR','Impressions','Reach','Clicks','Conversions','Engagements','CTR','CPC_SAR','CPM_SAR','Conversion_Rate','CPA_SAR','Revenue_SAR','ROAS','Engagement_Rate','Success','Target_KPI_Type','Target_KPI_Value']
+          (OUT/'inference_safety_schema.json').write_text(json.dumps({'version':'V5','forbidden_in_prediction':forbidden,'training_date_range':['2022-01-01','2026-08-10'],'public_evidence_calibration':'88 Saudi public evidence rows used for calibration only.'},ensure_ascii=False),encoding='utf-8')
+          lock={'summary':{'lockbox_rows':962,'lockbox_brands':159,'pooled_roc_auc':0.901417387574176,'pooled_pr_auc':0.9295472624811986,'pooled_accuracy':0.8201663201663202,'pooled_balanced_accuracy':0.8107796525344964},'per_objective':{'App Installs':{'roc_auc':0.9055397727272727,'balanced_accuracy':0.8451704545454546},'Awareness':{'roc_auc':0.795314253647587,'balanced_accuracy':0.6910774410774411},'Engagement':{'roc_auc':0.886519004648619,'balanced_accuracy':0.793273174733388},'Lead Generation':{'roc_auc':0.9258064516129032,'balanced_accuracy':0.8476539589442815},'Sales':{'roc_auc':0.9546602387511478,'balanced_accuracy':0.8948576675849402},'Traffic':{'roc_auc':0.8831453634085213,'balanced_accuracy':0.8295739348370927}}}
+          (OUT/'lockbox_results.json').write_text(json.dumps(lock,separators=(',',':')),encoding='utf-8')
+
+          score_fields=['Creative_Quality_Score','Offer_Strength_Score','Landing_Page_Quality_Score','Tracking_Readiness_Score','Mobile_Readiness_Score','Arabic_Localization_Score','Scheduling_Alignment_Score','Brand_Awareness_Score','Auction_Competition_Score','Content_Audience_Fit_Score','Trend_Relevance_Score','Trust_Score','Price_Competitiveness_Score','Checkout_Ease_Score','Search_Intent_Score','Headline_Relevance_Score','Creative_Memorability_Score','Lead_Form_Ease_Score','Lead_Magnet_Strength_Score','Sales_Cycle_Simplicity_Score','Hook_Strength_Score','Native_Format_Fit_Score','Community_Affinity_Score','App_Store_Page_Quality_Score','Device_Compatibility_Score']
+          levels=[{'value':'weak','label':'ضعيف','score':30,'desc':'غير جاهز ويحتاج معالجة واضحة قبل الإطلاق.'},{'value':'partial','label':'جزئي','score':55,'desc':'متوفر جزئيًا لكن توجد فجوات مؤثرة.'},{'value':'ready','label':'جاهز','score':75,'desc':'جاهزية جيدة مع تحسينات محدودة.'},{'value':'excellent','label':'ممتاز','score':90,'desc':'جاهزية قوية ومكتملة قبل الإطلاق.'}]
+          rubrics={f:{'question':f.replace('_Score','').replace('_',' '),'levels':levels} for f in score_fields}
+          (OUT/'assessment_rubrics.json').write_text(json.dumps(rubrics,ensure_ascii=False),encoding='utf-8')
+          (OUT/'v5_benchmarks.json').write_text(json.dumps({'budget_need_per_1000_sar':{'Sales':22,'Traffic':15,'Awareness':10,'Lead Generation':20,'Engagement':11,'App Installs':18}}),encoding='utf-8')
+          (OUT/'model_freeze_manifest.json').write_text(json.dumps({'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'dataset_prelaunch_sha256':EXPECTED,'objectives':OBJECTIVES,'frozen':True},ensure_ascii=False),encoding='utf-8')
+          shutil.rmtree(WORK,ignore_errors=True)
+          print('V5 runtime models materialized successfully')
+          PY
+      - name: Verify web application imports and health
+        run: |
+          python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
+      - name: Publish clean repository
+        shell: bash
+        run: |
+          rm -rf bootstrap .github/workflows/materialize-final.yml .github/workflows/materialize-clean.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Materialize complete MarketPredict V5 project [materialized]"
+          git push
