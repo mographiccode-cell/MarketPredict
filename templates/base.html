@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="نظام سعودي للتنبؤ بنجاح الحملات التسويقية قبل إطلاقها باستخدام مودلات V5 المجمدة.">
+  <title>{% block title %}MarketPredict V5{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="nav-shell">
+    <a class="brand" href="{{ '/dashboard' if g_user else '/' }}">
+      <span class="brand-mark"><span></span></span>
+      <span class="brand-copy"><b>MarketPredict</b><small>Saudi V5</small></span>
+    </a>
+    <button class="menu-toggle" id="menu-toggle" type="button" aria-label="فتح القائمة">☰</button>
+    <nav id="main-nav">
+      {% if g_user %}
+        <a href="/dashboard">لوحة التحكم</a>
+        <a href="/predict">تنبؤ جديد</a>
+        <a href="/history">السجل</a>
+        <a href="/model">المودل</a>
+        {% if g_user['is_admin'] %}<a href="/admin">الإدارة</a>{% endif %}
+        <form class="inline" method="post" action="/logout"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><button class="nav-logout">خروج</button></form>
+      {% else %}
+        <a href="/model">عن المودل</a>
+        <a href="/login">تسجيل الدخول</a>
+        <a class="nav-cta" href="/register">ابدأ الآن</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+<main>
+  {% if flashes %}<div class="flash-stack page-shell">{% for category,message in flashes %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="footer">
+  <div class="page-shell footer-inner">
+    <div><b>MarketPredict — Saudi V5</b><p>تنبؤ Pre-launch فقط. لا تُستخدم نتائج الحملة الحالية كمدخلات.</p></div>
+    <div class="footer-meta"><span>V5 Frozen Ensemble</span><span>LightGBM + CatBoost</span><span>Saudi-calibrated synthetic research model</span></div>
+  </div>
+</footer>
+<script src="{{ url_for('static', path='app.js') }}" defer></script>
+</body>
+</html>

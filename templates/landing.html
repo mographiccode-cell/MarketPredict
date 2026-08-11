@@ -1,0 +1,42 @@
+{% extends 'base.html' %}{% block title %}MarketPredict — توقّع نجاح حملتك{% endblock %}
+{% block content %}
+<section class="landing-hero">
+  <div class="page-shell hero-grid">
+    <div class="hero-copy">
+      <span class="eyebrow"><i></i> مودل V5 مجمّد · السوق السعودي</span>
+      <h1>اعرف فرصة نجاح حملتك<br><span>قبل أن تصرف الميزانية</span></h1>
+      <p>نظام بحثي يوجّه الحملة إلى واحد من ستة مودلات متخصصة، ويحلل التخطيط قبل الإطلاق فقط دون تسريب Clicks أو Conversions أو ROAS إلى المدخلات.</p>
+      <div class="hero-actions"><a class="btn btn-primary btn-lg" href="/register">ابدأ تنبؤًا جديدًا</a><a class="btn btn-ghost btn-lg" href="/model">كيف تم بناء المودل؟</a></div>
+      <div class="trust-row"><span>✓ 72,000 حملة V5</span><span>✓ 1,100 علامة</span><span>✓ 88 سجلًا سعوديًا للمعايرة</span></div>
+    </div>
+    <aside class="model-preview">
+      <div class="preview-head"><span>FINAL V5 LOCKBOX</span><b>Evaluated once after freeze</b></div>
+      <div class="score-orbit"><div><strong>{{ '%.2f'|format(lock_summary.get('pooled_roc_auc',0)*100) }}%</strong><span>Pooled ROC-AUC</span></div></div>
+      <div class="preview-metrics">
+        <div><b>{{ '%.2f'|format(lock_summary.get('pooled_accuracy',0)*100) }}%</b><span>Accuracy</span></div>
+        <div><b>{{ '%.2f'|format(lock_summary.get('pooled_balanced_accuracy',0)*100) }}%</b><span>Balanced Acc.</span></div>
+        <div><b>{{ lock_summary.get('lockbox_brands',0) }}</b><span>Unseen Brands</span></div>
+      </div>
+      <p>الـLockbox النهائية تحتوي حملات من Brands لم يرها التدريب، ولم تُستخدم النتائج لإعادة الضبط.</p>
+    </aside>
+  </div>
+</section>
+<section class="page-shell proof-strip">
+  <article><span>01</span><div><h3>Pre-launch only</h3><p>كل المتغيرات المستخدمة متاحة قبل تشغيل الحملة.</p></div></article>
+  <article><span>02</span><div><h3>Rubric Assessment</h3><p>لا حاجة لتخمين درجات الجودة؛ النظام يحسبها من تقييم موحد.</p></div></article>
+  <article><span>03</span><div><h3>Objective Routing</h3><p>مودل مختلف للمبيعات والزيارات والوعي والعملاء المحتملين والتفاعل والتطبيقات.</p></div></article>
+</section>
+<section class="page-shell section-block">
+  <div class="section-title"><span class="eyebrow">كيف يعمل</span><h2>من التخطيط إلى قرار قابل للدفاع عنه</h2><p>الهدف ليس إعطاء رقم فقط، بل توضيح لماذا النتيجة قوية أو تحتاج مراجعة.</p></div>
+  <div class="steps-grid">
+    <article><div class="step-no">1</div><h3>أدخل خطة الحملة</h3><p>المنصة، الهدف، الميزانية، الجمهور، القطاع، الموسم والتوقيت.</p></article>
+    <article><div class="step-no">2</div><h3>قيّم الجاهزية</h3><p>Rubrics واضحة للإبداع والعرض والصفحة والتتبع والتوطين والثقة.</p></article>
+    <article><div class="step-no">3</div><h3>تشغيل المودل المناسب</h3><p>Ensemble مجمّد من LightGBM وCatBoost مع Probability Calibration.</p></article>
+    <article><div class="step-no">4</div><h3>راجع القرار</h3><p>احتمال النجاح، Threshold، قوة القرار، جودة المودل، وتحسينات عملية.</p></article>
+  </div>
+</section>
+<section class="page-shell section-block evidence-band">
+  <div><span class="eyebrow">Saudi calibration</span><h2>مُعاير على أدلة السوق السعودي، لا على اسم السعودية فقط</h2><p>تم استخدام حملات سعودية ناجحة وفاشلة منشورة، وإحصاءات رسمية للسوق، لضبط نطاقات V5 دون تحويل قصص النجاح المنشورة إلى نسبة نجاح السوق.</p></div>
+  <a class="btn btn-light" href="/model">عرض المنهجية والنتائج</a>
+</section>
+{% endblock %}

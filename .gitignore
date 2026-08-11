@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+app.db
+*.db-wal
+*.db-shm
+.env
+.venv/
+.vercel/
+.v5_materialize/

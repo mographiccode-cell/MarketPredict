@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% block title %}إدارة النظام{% endblock %}{% block content %}
+<section class="page-shell app-page"><div class="page-head"><div><span class="eyebrow">Administration</span><h1>مراقبة النظام</h1><p>استخدام المودلات والمستخدمين المسجلين.</p></div></div>
+<div class="cards two">{% for c in counts %}<article class="panel compact-stat"><span>{{ objective_ar.get(c['objective'],c['objective']) }}</span><strong>{{ c['n'] }}</strong><small>متوسط الاحتمال {{ '%.1f'|format((c['avgp'] or 0)*100) }}%</small></article>{% endfor %}</div>
+<section class="panel"><h2>المستخدمون</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>الاسم</th><th>البريد</th><th>التنبؤات</th><th>تاريخ التسجيل</th></tr></thead><tbody>{% for u in users %}<tr><td>{{ u['id'] }}</td><td>{{ u['name'] }}</td><td>{{ u['email'] }}</td><td>{{ u['predictions'] }}</td><td>{{ u['created_at'] }}</td></tr>{% endfor %}</tbody></table></div></section></section>
+{% endblock %}
