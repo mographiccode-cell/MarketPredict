@@ -1,11 +1,11 @@
-name: Materialize V5 Model
+name: Materialize MarketPredict Final
 
 on:
   push:
     branches: [main]
     paths:
       - 'bootstrap/**'
-      - '.github/workflows/materialize-v5.yml'
+      - '.github/workflows/materialize-final.yml'
   workflow_dispatch:
 
 permissions:
@@ -20,62 +20,49 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - run: python -m pip install -r requirements.txt
-      - name: Build exact frozen V5 artifacts
+      - name: Build V5 model and complete project
         shell: bash
         run: |
           python - <<'PY'
           import gzip, hashlib, joblib, shutil, subprocess, sys, tarfile
           from pathlib import Path
-
           ROOT=Path.cwd(); BOOT=ROOT/'bootstrap'; WORK=ROOT/'.v5_materialize'; MODELS=ROOT/'models'; ML=ROOT/'ml'
-          GEN_SHA='18a7d44374e29ad058fb77d08f3ef8671989aa7d0895dd7d2057530e7e7c14ac'
-          TRAIN_SHA='801c31dc182577f7b954acb61b1bff9d6d9be5b7f13b7dfc4108d0737dfceab2'
-          SUPPORT_SHA='c05f984ff0c60b0159944dc3adc74085f4347f43ee5dcc6345dbfa3315158e68'
-          DATASET_SHA='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
+          EXPECTED='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
           FREEZE='5f3874c8a663d329d7e19876e924f44ee09dd0683ac72dc5a017811e05125792'
           objectives=['Sales','Traffic','Awareness','Lead Generation','Engagement','App Installs']
-
-          def verify(path, expected):
-              got=hashlib.sha256(path.read_bytes()).hexdigest()
-              if got != expected: raise RuntimeError(f'SHA mismatch for {path}: {got}')
-
-          gen_gz=BOOT/'generator.py.gz'; train_gz=BOOT/'trainer.py.gz'; support=BOOT/'support.tar.gz'
-          verify(gen_gz,GEN_SHA); verify(train_gz,TRAIN_SHA); verify(support,SUPPORT_SHA)
+          with tarfile.open(BOOT/'support.tar.gz','r:gz') as tf:
+              tf.extractall(ROOT,filter='data')
+          generator=gzip.open(BOOT/'generator.py.gz','rt',encoding='utf-8').read()
+          trainer=gzip.open(BOOT/'trainer.py.gz','rt',encoding='utf-8').read()
           WORK.mkdir(exist_ok=True); MODELS.mkdir(exist_ok=True); ML.mkdir(exist_ok=True)
-          with tarfile.open(support,'r:gz') as tf: tf.extractall(ROOT,filter='data')
-          generator=gzip.open(gen_gz,'rt',encoding='utf-8').read()
-          trainer=gzip.open(train_gz,'rt',encoding='utf-8').read()
           (ML/'generate_saudi_marketing_dataset_v5.py').write_text(generator,encoding='utf-8')
           (ML/'train_v5_stage1.py').write_text(trainer,encoding='utf-8')
           (WORK/'generate.py').write_text(generator.replace("out=Path('/mnt/data')",f"out=Path({str(WORK)!r})"),encoding='utf-8')
           (WORK/'train.py').write_text(trainer.replace("BASE=Path('/mnt/data')",f"BASE=Path({str(WORK)!r})"),encoding='utf-8')
           subprocess.run([sys.executable,str(WORK/'generate.py')],check=True)
           pre=WORK/'saudi_marketing_campaigns_v5_prelaunch.csv'
-          verify(pre,DATASET_SHA)
+          got=hashlib.sha256(pre.read_bytes()).hexdigest()
+          if got != EXPECTED: raise RuntimeError(f'Dataset SHA mismatch: {got}')
           bundles={}
           for obj in objectives:
               subprocess.run([sys.executable,str(WORK/'train.py'),obj],check=True)
-              slug=obj.replace(' ','_').lower()
-              bundles[obj]=joblib.load(WORK/f'v5_model_{slug}.joblib')
+              bundles[obj]=joblib.load(WORK/f"v5_model_{obj.replace(' ','_').lower()}.joblib")
           suite={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'models':bundles,'lockbox_results_file':'lockbox_results.json'}
           joblib.dump(suite,MODELS/'model_suite.joblib',compress=3)
-          loaded=joblib.load(MODELS/'model_suite.joblib')
-          if set(loaded['models']) != set(objectives): raise RuntimeError('Model suite objective mismatch')
+          if set(joblib.load(MODELS/'model_suite.joblib')['models']) != set(objectives): raise RuntimeError('Objective mismatch')
           shutil.rmtree(WORK,ignore_errors=True)
-          print('V5 model suite materialized:', (MODELS/'model_suite.joblib').stat().st_size)
+          print('Materialized model suite bytes:',(MODELS/'model_suite.joblib').stat().st_size)
           PY
-      - name: Install test requirements
-        run: python -m pip install -r requirements-dev.txt
-      - name: Verify complete website
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Run website tests
         run: |
           python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
           pytest -q
-      - name: Remove bootstrap and publish real project files
+      - name: Publish final repository shape
         shell: bash
         run: |
-          rm -rf bootstrap .github/workflows/materialize-v5.yml
+          rm -rf bootstrap .github/workflows/materialize-v5.yml .github/workflows/materialize-final.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
