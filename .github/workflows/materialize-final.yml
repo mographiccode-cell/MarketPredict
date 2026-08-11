@@ -54,7 +54,7 @@ jobs:
           shutil.rmtree(WORK,ignore_errors=True)
           print('Materialized model suite bytes:',(MODELS/'model_suite.joblib').stat().st_size)
           PY
-      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install pytest httpx
       - name: Run website tests
         run: |
           python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
