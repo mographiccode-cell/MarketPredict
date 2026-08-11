@@ -1,0 +1,39 @@
+name: MarketPredict Production Smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Vercel and verify live application
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://market-predict-git-main-mographiccode.vercel.app"
+          HEALTH_OK=0
+          for i in $(seq 1 36); do
+            CODE=$(curl -L -sS -o /tmp/health.json -w '%{http_code}' "$BASE/health" || true)
+            echo "Attempt $i: /health -> HTTP $CODE"
+            if [ "$CODE" = "200" ] && grep -q '"status":"ok"' /tmp/health.json && grep -q '"model_version":"V5"' /tmp/health.json; then
+              HEALTH_OK=1
+              cat /tmp/health.json
+              break
+            fi
+            sleep 10
+          done
+          if [ "$HEALTH_OK" != "1" ]; then
+            echo "Production /health did not become ready"
+            cat /tmp/health.json || true
+            exit 1
+          fi
+
+          CODE=$(curl -L -sS -o /tmp/login.html -w '%{http_code}' "$BASE/login")
+          echo "/login -> HTTP $CODE"
+          test "$CODE" = "200"
+          grep -q 'demo-login' /tmp/login.html
+          grep -q 'MarketPredict' /tmp/login.html
+          echo "Production smoke test passed: health + login + one-click demo form are live."
