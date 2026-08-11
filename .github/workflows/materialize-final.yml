@@ -40,8 +40,13 @@ jobs:
           def slug(s): return re.sub(r'[^a-z0-9]+','_',s.lower()).strip('_')
           def jval(x): return x.item() if isinstance(x,np.generic) else x
 
+          # The support archive contains tests/sample payloads/metadata from the frozen V5 build.
+          # It also contains an older predictor and requirements file, so restore the lightweight
+          # production runtime from the current commit immediately after extraction.
           with tarfile.open(BOOT/'support.tar.gz','r:gz') as tf:
               tf.extractall(ROOT,filter='data')
+          subprocess.run(['git','checkout','--','predictor.py','requirements.txt'],check=True)
+
           generator=gzip.open(BOOT/'generator.py.gz','rt',encoding='utf-8').read()
           trainer=gzip.open(BOOT/'trainer.py.gz','rt',encoding='utf-8').read()
           WORK.mkdir(exist_ok=True); MODELS.mkdir(exist_ok=True); ML.mkdir(exist_ok=True)
@@ -139,7 +144,7 @@ jobs:
       - name: Publish lightweight production repository
         shell: bash
         run: |
-          rm -rf bootstrap .v5_materialize requirements-build.txt .github/workflows/materialize-final.yml
+          rm -rf bootstrap .v5_materialize requirements-build.txt .github/workflows/materialize-final.yml .github/workflows/materialize-clean.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
