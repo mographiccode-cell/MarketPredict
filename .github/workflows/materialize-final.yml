@@ -1,5 +1,6 @@
 name: Materialize Lightweight MarketPredict V5
 
+# Re-run marker: metadata-ready-runtime-v1
 on:
   push:
     branches: [main]
@@ -40,12 +41,20 @@ jobs:
           def slug(s): return re.sub(r'[^a-z0-9]+','_',s.lower()).strip('_')
           def jval(x): return x.item() if isinstance(x,np.generic) else x
 
-          # The support archive contains tests/sample payloads/metadata from the frozen V5 build.
-          # It also contains an older predictor and requirements file, so restore the lightweight
-          # production runtime from the current commit immediately after extraction.
+          # Preserve current production runtime/metadata. The support archive only supplies
+          # tests/sample payloads needed for verification and must not replace live files.
+          preserved={}
+          for rel in [
+              'predictor.py','requirements.txt','models/app_schema.json','models/inference_safety_schema.json',
+              'models/lockbox_results.json','models/v5_benchmarks.json'
+          ]:
+              p=ROOT/rel
+              if p.exists(): preserved[rel]=p.read_bytes()
+
           with tarfile.open(BOOT/'support.tar.gz','r:gz') as tf:
               tf.extractall(ROOT,filter='data')
-          subprocess.run(['git','checkout','--','predictor.py','requirements.txt'],check=True)
+          for rel,data in preserved.items():
+              p=ROOT/rel; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data)
 
           generator=gzip.open(BOOT/'generator.py.gz','rt',encoding='utf-8').read()
           trainer=gzip.open(BOOT/'trainer.py.gz','rt',encoding='utf-8').read()
