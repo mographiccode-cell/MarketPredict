@@ -59,8 +59,31 @@ def _ensure_demo_user() -> int:
 
 DEMO_USER_ID = _ensure_demo_user()
 
-predictor = CampaignPredictor()
-schema = predictor.schema
+# Model loading is intentionally lazy. A model-runtime failure must not take down
+# the whole FastAPI function; /health remains available for diagnostics.
+predictor: CampaignPredictor | None = None
+_predictor_error: str | None = None
+
+with (BASE_DIR / "models" / "app_schema.json").open("r", encoding="utf-8") as fh:
+    schema = json.load(fh)
+with (BASE_DIR / "models" / "portable_suite.json").open("r", encoding="utf-8") as fh:
+    _portable_meta = json.load(fh)
+with (BASE_DIR / "models" / "lockbox_results.json").open("r", encoding="utf-8") as fh:
+    _lockbox_meta = json.load(fh)
+
+
+def get_predictor() -> CampaignPredictor:
+    global predictor, _predictor_error
+    if predictor is None:
+        try:
+            predictor = CampaignPredictor()
+            _predictor_error = None
+        except Exception as exc:
+            _predictor_error = f"{type(exc).__name__}: {exc}"
+            raise
+    return predictor
+
+
 _rate: dict[str, deque[float]] = defaultdict(deque)
 
 OBJECTIVE_AR = {
@@ -109,8 +132,8 @@ def _context(request: Request, **kwargs):
         "rubrics": RUBRICS,
         "objective_ar": OBJECTIVE_AR,
         "app_title": APP_TITLE,
-        "model_version": predictor.suite.get("dataset_version", "V5"),
-        "lock_summary": predictor.lockbox.get("summary", {}),
+        "model_version": _portable_meta.get("dataset_version", "V5"),
+        "lock_summary": _lockbox_meta.get("summary", {}),
         "demo_email": DEMO_EMAIL,
         "demo_password": DEMO_PASSWORD,
     }
@@ -175,7 +198,7 @@ async def index(request: Request):
 
 @app.get("/model", response_class=HTMLResponse)
 async def model_page(request: Request):
-    per = predictor.lockbox.get("per_objective", {})
+    per = _lockbox_meta.get("per_objective", {})
     return templates.TemplateResponse(request, "model.html", _context(request, per_objective=per))
 
 
@@ -282,7 +305,7 @@ async def predict_page(request: Request):
         raw_form = {k: v for k, v in form.items() if v not in (None, "")}
         try:
             payload, provenance, assessment_warnings = apply_auto_assessment(raw_form)
-            result = predictor.predict(payload).as_dict()
+            result = get_predictor().predict(payload).as_dict()
             result["warnings"] = assessment_warnings + result.get("warnings", [])
         except (InputValidationError, ValueError) as exc:
             errors = exc.errors if isinstance(exc, InputValidationError) else [str(exc)]
@@ -393,14 +416,15 @@ async def api_schema():
 
 @app.get("/api/model-info")
 async def model_info():
+    safety = json.loads((BASE_DIR / "models" / "inference_safety_schema.json").read_text(encoding="utf-8"))
     return JSONResponse({
-        "model_version": predictor.suite.get("dataset_version"),
-        "objectives": sorted(predictor.objectives),
-        "freeze_manifest_sha256": predictor.suite.get("freeze_manifest_sha256"),
-        "final_lockbox": predictor.lockbox.get("summary", {}),
-        "per_objective": predictor.lockbox.get("per_objective", {}),
+        "model_version": _portable_meta.get("dataset_version"),
+        "objectives": sorted(_portable_meta.get("models", {}).keys()),
+        "freeze_manifest_sha256": _portable_meta.get("freeze_manifest_sha256"),
+        "final_lockbox": _lockbox_meta.get("summary", {}),
+        "per_objective": _lockbox_meta.get("per_objective", {}),
         "policy": "Pre-launch only. Current-campaign post-launch fields are rejected.",
-        "public_evidence_calibration": predictor.safety.get("public_evidence_calibration"),
+        "public_evidence_calibration": safety.get("public_evidence_calibration"),
     })
 
 
@@ -415,7 +439,7 @@ async def api_predict(request: Request):
     raw = await request.json()
     try:
         payload, provenance, assessment_warnings = apply_auto_assessment(dict(raw))
-        result = predictor.predict(payload).as_dict()
+        result = get_predictor().predict(payload).as_dict()
         result["warnings"] = assessment_warnings + result.get("warnings", [])
     except (InputValidationError, ValueError) as exc:
         details = exc.errors if isinstance(exc, InputValidationError) else [str(exc)]
@@ -427,7 +451,22 @@ async def api_predict(request: Request):
 
 @app.get("/health")
 async def health():
-    return JSONResponse({"status":"ok","model_version":"V5","objectives":len(predictor.models),"freeze":predictor.suite.get("freeze_manifest_sha256")})
+    global _predictor_error
+    ready = False
+    try:
+        p = get_predictor()
+        ready = True
+    except Exception:
+        p = None
+    return JSONResponse({
+        "status": "ok" if ready else "degraded",
+        "service": APP_TITLE,
+        "model_ready": ready,
+        "model_version": _portable_meta.get("dataset_version", "V5"),
+        "objectives": len(_portable_meta.get("models", {})),
+        "freeze": _portable_meta.get("freeze_manifest_sha256"),
+        "model_error": _predictor_error,
+    })
 
 
 def seed_admin(email: str | None = None, password: str | None = None):
@@ -440,14 +479,19 @@ def seed_admin(email: str | None = None, password: str | None = None):
         if existing:
             con.execute("UPDATE users SET is_admin=1,password_hash=? WHERE id=?", (hash_password(password), existing["id"]))
         else:
-            con.execute("INSERT INTO users(name,email,password_hash,is_admin) VALUES(?,?,?,1)", ("Administrator", email, hash_password(password)))
-    print("Admin ready:", email)
+            con.execute("INSERT INTO users(name,email,password_hash,is_admin) VALUES(?,?,?,1)", ("Admin", email, hash_password(password)))
+    print(f"Admin ready: {email}")
 
 
 if __name__ == "__main__":
-    import sys
-    if "--seed-admin" in sys.argv:
+    import argparse
+    import uvicorn
+    parser = argparse.ArgumentParser(description=APP_TITLE)
+    parser.add_argument("--seed-admin", action="store_true")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=5000)
+    args = parser.parse_args()
+    if args.seed_admin:
         seed_admin()
     else:
-        import uvicorn
-        uvicorn.run("app:app", host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "5000")), reload=False)
+        uvicorn.run(app, host=args.host, port=args.port)
