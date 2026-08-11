@@ -64,7 +64,7 @@ def test_demo_login_evidence_form_prediction_and_history():
 
     history = client.get("/history")
     assert history.status_code == 200
-    assert "Sales" in history.text
+    assert "السجل" in history.text
 
 
 def test_evidence_overrides_numeric_score_server_side():
