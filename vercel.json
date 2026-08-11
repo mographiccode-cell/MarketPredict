@@ -3,7 +3,8 @@
   "functions": {
     "app.py": {
       "maxDuration": 60,
-      "excludeFiles": "{ml/**,tests/**,sample_payloads/**,docs/**,.github/**,**/__pycache__/**,*.db}"
+      "includeFiles": "{marketpredict_app.py,assessment.py,auth.py,db.py,predictor.py,models/**,templates/**,static/**}",
+      "excludeFiles": "{ml/**,tests/**,sample_payloads/**,docs/**,.github/**,api/**,**/__pycache__/**,*.db}"
     }
   }
 }
