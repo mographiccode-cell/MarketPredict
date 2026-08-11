@@ -1,4 +1,4 @@
-name: Materialize V5 Models
+name: Materialize V5 Model
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build-models:
+  materialize:
     if: ${{ !contains(github.event.head_commit.message || '', '[materialized]') }}
     runs-on: ubuntu-latest
     steps:
@@ -22,85 +22,62 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
       - run: python -m pip install -r requirements.txt
-      - name: Rebuild frozen V5 and publish native model files
+      - name: Build exact frozen V5 artifacts
         shell: bash
         run: |
           python - <<'PY'
-          import base64,gzip,hashlib,json,joblib,re,shutil,subprocess,sys
+          import gzip, hashlib, joblib, shutil, subprocess, sys, tarfile
           from pathlib import Path
-          import numpy as np
-          import pandas as pd
 
-          ROOT=Path.cwd();BOOT=ROOT/'bootstrap';WORK=ROOT/'.v5_materialize';OUT=ROOT/'models';NATIVE=OUT/'native'
-          EXPECTED='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
+          ROOT=Path.cwd(); BOOT=ROOT/'bootstrap'; WORK=ROOT/'.v5_materialize'; MODELS=ROOT/'models'; ML=ROOT/'ml'
+          GEN_SHA='18a7d44374e29ad058fb77d08f3ef8671989aa7d0895dd7d2057530e7e7c14ac'
+          TRAIN_SHA='801c31dc182577f7b954acb61b1bff9d6d9be5b7f13b7dfc4108d0737dfceab2'
+          SUPPORT_SHA='c05f984ff0c60b0159944dc3adc74085f4347f43ee5dcc6345dbfa3315158e68'
+          DATASET_SHA='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
           FREEZE='5f3874c8a663d329d7e19876e924f44ee09dd0683ac72dc5a017811e05125792'
-          OBJECTIVES=['Sales','Traffic','Awareness','Lead Generation','Engagement','App Installs']
-          def unpack(name):
-              raw=base64.b64decode((BOOT/name).read_text(encoding='utf-8').strip())
-              return gzip.decompress(raw).decode('utf-8')
-          WORK.mkdir(exist_ok=True);(ROOT/'ml').mkdir(exist_ok=True);OUT.mkdir(exist_ok=True);NATIVE.mkdir(exist_ok=True)
-          generator=unpack('generator.gz.b64');trainer=unpack('trainer.gz.b64')
-          (ROOT/'ml'/'generate_saudi_marketing_dataset_v5.py').write_text(generator,encoding='utf-8')
-          (ROOT/'ml'/'train_v5_stage1.py').write_text(trainer,encoding='utf-8')
-          gen_run=generator.replace("out=Path('/mnt/data')",f"out=Path({str(WORK)!r})")
-          train_run=trainer.replace("BASE=Path('/mnt/data')",f"BASE=Path({str(WORK)!r})")
-          (WORK/'generate.py').write_text(gen_run);(WORK/'train.py').write_text(train_run)
+          objectives=['Sales','Traffic','Awareness','Lead Generation','Engagement','App Installs']
+
+          def verify(path, expected):
+              got=hashlib.sha256(path.read_bytes()).hexdigest()
+              if got != expected: raise RuntimeError(f'SHA mismatch for {path}: {got}')
+
+          gen_gz=BOOT/'generator.py.gz'; train_gz=BOOT/'trainer.py.gz'; support=BOOT/'support.tar.gz'
+          verify(gen_gz,GEN_SHA); verify(train_gz,TRAIN_SHA); verify(support,SUPPORT_SHA)
+          WORK.mkdir(exist_ok=True); MODELS.mkdir(exist_ok=True); ML.mkdir(exist_ok=True)
+          with tarfile.open(support,'r:gz') as tf: tf.extractall(ROOT,filter='data')
+          generator=gzip.open(gen_gz,'rt',encoding='utf-8').read()
+          trainer=gzip.open(train_gz,'rt',encoding='utf-8').read()
+          (ML/'generate_saudi_marketing_dataset_v5.py').write_text(generator,encoding='utf-8')
+          (ML/'train_v5_stage1.py').write_text(trainer,encoding='utf-8')
+          (WORK/'generate.py').write_text(generator.replace("out=Path('/mnt/data')",f"out=Path({str(WORK)!r})"),encoding='utf-8')
+          (WORK/'train.py').write_text(trainer.replace("BASE=Path('/mnt/data')",f"BASE=Path({str(WORK)!r})"),encoding='utf-8')
           subprocess.run([sys.executable,str(WORK/'generate.py')],check=True)
           pre=WORK/'saudi_marketing_campaigns_v5_prelaunch.csv'
-          got=hashlib.sha256(pre.read_bytes()).hexdigest()
-          if got!=EXPECTED: raise RuntimeError(f'V5 dataset SHA mismatch: {got}')
+          verify(pre,DATASET_SHA)
           bundles={}
-          for objective in OBJECTIVES:
-              subprocess.run([sys.executable,str(WORK/'train.py'),objective],check=True)
-              slug=objective.replace(' ','_').lower();bundles[objective]=joblib.load(WORK/f'v5_model_{slug}.joblib')
-          def slug(s): return re.sub(r'[^a-z0-9]+','_',s.lower()).strip('_')
-          def jval(x): return x.item() if isinstance(x,np.generic) else x
-          meta={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'lockbox_results_file':'lockbox_results.json','models':{}}
-          for obj,b in bundles.items():
-              sl=slug(obj);pipe=b['lgb'];prep=pipe.named_steps['prep'];lgbm=pipe.named_steps['model'];cat=b['cat']['model']
-              lgb_name=f'{sl}_lgb.txt.gz';cat_name=f'{sl}_cat.cbm'
-              tmp=WORK/f'{sl}.txt';lgbm.booster_.save_model(str(tmp))
-              with gzip.open(NATIVE/lgb_name,'wt',encoding='utf-8') as fh: fh.write(tmp.read_text())
-              cat.save_model(str(NATIVE/cat_name))
-              num_cols=list(prep.transformers_[0][2]);num_imp=prep.transformers_[0][1];cat_cols=list(prep.transformers_[1][2]);cp=prep.transformers_[1][1];cat_imp=cp.named_steps['imp'];ohe=cp.named_steps['ohe']
-              meta['models'][obj]={'objective':obj,'features':list(b['features']),'weight_lgb':float(b['weight_lgb']),'threshold':float(b['threshold']),'calibrator_coef':float(b['calibrator'].coef_[0,0]),'calibrator_intercept':float(b['calibrator'].intercept_[0]),'lgb_model_file':lgb_name,'lgb_num_cols':num_cols,'lgb_num_medians':{c:float(v) for c,v in zip(num_cols,num_imp.statistics_)},'lgb_cat_cols':cat_cols,'lgb_cat_fill':{c:jval(v) for c,v in zip(cat_cols,cat_imp.statistics_)},'lgb_cat_categories':{c:[jval(v) for v in cats.tolist()] for c,cats in zip(cat_cols,ohe.categories_)},'cat_model_file':cat_name,'cat_cols':list(b['cat']['cat']),'cat_num_cols':list(b['cat']['num']),'cat_medians':{k:float(v) for k,v in b['cat']['med'].items()}}
-          (OUT/'portable_suite.json').write_text(json.dumps(meta,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
-
-          # Copy the already validated app metadata from the local generation logic.
-          df=pd.read_csv(pre,low_memory=False)
-          opt_fields=['Platform','Placement','Content_Type','Industry','Region','City','Target_Age','Target_Gender','Audience_Strategy','Audience_Intent','Bidding_Strategy','Brand_Maturity','Season','Product_Price_Band']
-          options={c:sorted(df[c].dropna().astype(str).unique().tolist()) for c in opt_fields}
-          region_city={r:sorted(g['City'].dropna().astype(str).unique().tolist()) for r,g in df.groupby('Region')}
-          platform_placements={r:sorted(g['Placement'].dropna().astype(str).unique().tolist()) for r,g in df.groupby('Platform')}
-          platform_content={r:sorted(g['Content_Type'].dropna().astype(str).unique().tolist()) for r,g in df.groupby('Platform')}
-          obj_bid={r:sorted(g['Bidding_Strategy'].dropna().astype(str).unique().tolist()) for r,g in df.groupby('Campaign_Objective')}
-          required=['Start_Date','Campaign_Objective','Duration_Days','Budget_SAR','Platform','Placement','Content_Type','Industry','Region','City','Target_Age','Target_Gender','Audience_Strategy','Audience_Intent','Estimated_Audience_Size','Bidding_Strategy','Brand_Maturity','Season','Creative_Quality_Score','Offer_Strength_Score','Landing_Page_Quality_Score','Tracking_Readiness_Score','Mobile_Readiness_Score','Arabic_Localization_Score','Scheduling_Alignment_Score','Brand_Awareness_Score','Auction_Competition_Score','Content_Audience_Fit_Score','Trend_Relevance_Score','Trust_Score','Budget_Adequacy_Score','Product_Price_Band','Expected_AOV_SAR']
-          obj_req={'Sales':['Discount_Percentage','Checkout_Ease_Score','Price_Competitiveness_Score'],'Traffic':['Discount_Percentage','Headline_Relevance_Score','Search_Intent_Score'],'Awareness':['Creative_Memorability_Score','Planned_Frequency'],'Lead Generation':['Discount_Percentage','Lead_Form_Ease_Score','Lead_Magnet_Strength_Score','Sales_Cycle_Simplicity_Score'],'Engagement':['Community_Affinity_Score','Hook_Strength_Score','Native_Format_Fit_Score'],'App Installs':['Discount_Percentage','App_Store_Rating','App_Store_Page_Quality_Score','App_Size_MB','Device_Compatibility_Score']}
-          history=['Brand_Prior_Campaigns','Brand_Prior_Success_Rate','Brand_Prior_CTR','Brand_Prior_CVR','Brand_Platform_Prior_Campaigns','Brand_Platform_Prior_Success_Rate','Brand_Platform_Prior_CTR','Brand_Platform_Prior_CVR','Brand_Objective_Prior_Campaigns','Brand_Objective_Prior_Success_Rate','Brand_Objective_Prior_CTR','Brand_Objective_Prior_CVR','Days_Since_Last_Campaign','Brand_Recent5_Success_Rate']
-          score_fields=['Creative_Quality_Score','Offer_Strength_Score','Landing_Page_Quality_Score','Tracking_Readiness_Score','Mobile_Readiness_Score','Arabic_Localization_Score','Scheduling_Alignment_Score','Brand_Awareness_Score','Auction_Competition_Score','Content_Audience_Fit_Score','Trend_Relevance_Score','Trust_Score','Budget_Adequacy_Score','Price_Competitiveness_Score','Checkout_Ease_Score','Search_Intent_Score','Headline_Relevance_Score','Creative_Memorability_Score','Lead_Form_Ease_Score','Lead_Magnet_Strength_Score','Sales_Cycle_Simplicity_Score','Hook_Strength_Score','Native_Format_Fit_Score','Community_Affinity_Score','App_Store_Page_Quality_Score','Device_Compatibility_Score']
-          ranges={'Duration_Days':[1,120],'Budget_SAR':[100,1000000],'Estimated_Audience_Size':[100,50000000],'Expected_AOV_SAR':[0,100000],'Discount_Percentage':[0,100],'Planned_Frequency':[1,30],'App_Store_Rating':[1,5],'App_Size_MB':[1,5000],'Days_Since_Last_Campaign':[0,3650]}
-          ranges.update({f:[0,100] for f in score_fields});ranges.update({f:[0,10000] for f in ['Brand_Prior_Campaigns','Brand_Platform_Prior_Campaigns','Brand_Objective_Prior_Campaigns']});ranges.update({f:[0,1] for f in history if 'Rate' in f or 'CTR' in f or 'CVR' in f})
-          schema={'version':'V5-app-2.0','objectives':sorted(OBJECTIVES),'options':options,'region_city':region_city,'training_date_range':['2022-01-01','2026-08-10'],'required_fields':required,'objective_specific_required':obj_req,'optional_history_fields':history,'numeric_ranges':ranges,'platform_placements':platform_placements,'platform_content_types':platform_content,'objective_bidding_strategies':obj_bid,'model_version':'V5','freeze_manifest_sha256':FREEZE,'field_labels_ar':{}}
-          (OUT/'app_schema.json').write_text(json.dumps(schema,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
-          forbidden=['Spend_SAR','Impressions','Reach','Clicks','Conversions','Engagements','CTR','CPC_SAR','CPM_SAR','Conversion_Rate','CPA_SAR','Revenue_SAR','ROAS','Engagement_Rate','Success','Target_KPI_Type','Target_KPI_Value']
-          (OUT/'inference_safety_schema.json').write_text(json.dumps({'version':'V5','forbidden_in_prediction':forbidden,'training_date_range':['2022-01-01','2026-08-10'],'public_evidence_calibration':'88 Saudi public evidence rows used for calibration only.'},ensure_ascii=False),encoding='utf-8')
-          lock={'summary':{'lockbox_rows':962,'lockbox_brands':159,'pooled_roc_auc':0.901417387574176,'pooled_pr_auc':0.9295472624811986,'pooled_accuracy':0.8201663201663202,'pooled_balanced_accuracy':0.8107796525344964},'per_objective':{'App Installs':{'roc_auc':0.9055397727272727,'balanced_accuracy':0.8451704545454546},'Awareness':{'roc_auc':0.795314253647587,'balanced_accuracy':0.6910774410774411},'Engagement':{'roc_auc':0.886519004648619,'balanced_accuracy':0.793273174733388},'Lead Generation':{'roc_auc':0.9258064516129032,'balanced_accuracy':0.8476539589442815},'Sales':{'roc_auc':0.9546602387511478,'balanced_accuracy':0.8948576675849402},'Traffic':{'roc_auc':0.8831453634085213,'balanced_accuracy':0.8295739348370927}}}
-          (OUT/'lockbox_results.json').write_text(json.dumps(lock),encoding='utf-8')
-          generic_levels=[{'value':'weak','label':'ضعيف','score':30,'desc':'غير جاهز ويحتاج معالجة واضحة قبل الإطلاق.'},{'value':'basic','label':'أساسي','score':52,'desc':'متوفر جزئيًا لكن توجد فجوات مؤثرة.'},{'value':'ready','label':'جاهز','score':75,'desc':'جاهزية جيدة مع تحسينات محدودة.'},{'value':'excellent','label':'ممتاز','score':90,'desc':'جاهزية قوية ومكتملة قبل الإطلاق.'}]
-          rubrics={f:{'question':f.replace('_Score','').replace('_',' '),'levels':generic_levels} for f in score_fields if f!='Budget_Adequacy_Score'}
-          (OUT/'assessment_rubrics.json').write_text(json.dumps(rubrics,ensure_ascii=False),encoding='utf-8')
-          (OUT/'v5_benchmarks.json').write_text(json.dumps({'budget_need_per_1000_sar':{'Sales':22,'Traffic':15,'Awareness':10,'Lead Generation':20,'Engagement':11,'App Installs':18}}),encoding='utf-8')
+          for obj in objectives:
+              subprocess.run([sys.executable,str(WORK/'train.py'),obj],check=True)
+              slug=obj.replace(' ','_').lower()
+              bundles[obj]=joblib.load(WORK/f'v5_model_{slug}.joblib')
+          suite={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'models':bundles,'lockbox_results_file':'lockbox_results.json'}
+          joblib.dump(suite,MODELS/'model_suite.joblib',compress=3)
+          loaded=joblib.load(MODELS/'model_suite.joblib')
+          if set(loaded['models']) != set(objectives): raise RuntimeError('Model suite objective mismatch')
           shutil.rmtree(WORK,ignore_errors=True)
-          shutil.rmtree(BOOT,ignore_errors=True)
-          print('V5 materialized successfully:',got)
+          print('V5 model suite materialized:', (MODELS/'model_suite.joblib').stat().st_size)
           PY
-      - name: Verify app imports
-        run: python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
-      - name: Commit materialized project
+      - name: Install test requirements
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify complete website
         run: |
+          python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
+          pytest -q
+      - name: Remove bootstrap and publish real project files
+        shell: bash
+        run: |
+          rm -rf bootstrap .github/workflows/materialize-v5.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet && exit 0
-          git commit -m "Materialize frozen V5 model files [materialized]"
+          git commit -m "Materialize complete MarketPredict V5 project [materialized]"
           git push
