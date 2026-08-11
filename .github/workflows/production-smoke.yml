@@ -9,16 +9,18 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for Vercel and verify live application
+      - uses: actions/checkout@v4
+
+      - name: Wait for Vercel and verify model runtime
         shell: bash
         run: |
           set -euo pipefail
           BASE="https://market-predict-git-main-mographiccode.vercel.app"
           HEALTH_OK=0
-          for i in $(seq 1 36); do
+          for i in $(seq 1 42); do
             CODE=$(curl -L -sS -o /tmp/health.json -w '%{http_code}' "$BASE/health" || true)
             echo "Attempt $i: /health -> HTTP $CODE"
-            if [ "$CODE" = "200" ] && grep -q '"status":"ok"' /tmp/health.json && grep -q '"model_version":"V5"' /tmp/health.json; then
+            if [ "$CODE" = "200" ] && grep -q '"status":"ok"' /tmp/health.json && grep -q '"model_ready":true' /tmp/health.json && grep -q '"model_version":"V5"' /tmp/health.json; then
               HEALTH_OK=1
               cat /tmp/health.json
               break
@@ -26,14 +28,52 @@ jobs:
             sleep 10
           done
           if [ "$HEALTH_OK" != "1" ]; then
-            echo "Production /health did not become ready"
+            echo "Production /health did not become model-ready"
             cat /tmp/health.json || true
             exit 1
           fi
 
-          CODE=$(curl -L -sS -o /tmp/login.html -w '%{http_code}' "$BASE/login")
+      - name: Login with one-click demo account
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://market-predict-git-main-mographiccode.vercel.app"
+          CODE=$(curl -sS -c /tmp/cookies.txt -o /tmp/login.html -w '%{http_code}' "$BASE/login")
           echo "/login -> HTTP $CODE"
           test "$CODE" = "200"
-          grep -q 'demo-login' /tmp/login.html
-          grep -q 'MarketPredict' /tmp/login.html
-          echo "Production smoke test passed: health + login + one-click demo form are live."
+          TOKEN=$(grep -o 'name="_csrf" value="[^"]*"' /tmp/login.html | head -1 | sed 's/.*value="//;s/"$//')
+          test -n "$TOKEN"
+          CODE=$(curl -sS -b /tmp/cookies.txt -c /tmp/cookies.txt -o /tmp/demo.out -w '%{http_code}' \
+            -X POST --data-urlencode "_csrf=$TOKEN" "$BASE/demo-login")
+          echo "/demo-login -> HTTP $CODE"
+          test "$CODE" = "303"
+
+      - name: Run a real V5 prediction for every objective
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://market-predict-git-main-mographiccode.vercel.app"
+          COUNT=0
+          for payload in sample_payloads/*.json; do
+            name=$(basename "$payload")
+            CODE=$(curl -sS -b /tmp/cookies.txt -o /tmp/predict.json -w '%{http_code}' \
+              -H 'Content-Type: application/json' -H 'Accept: application/json' \
+              --data-binary "@$payload" "$BASE/api/predict")
+            echo "$name -> HTTP $CODE"
+            if [ "$CODE" != "200" ]; then
+              cat /tmp/predict.json || true
+              exit 1
+            fi
+            grep -q '"probability"' /tmp/predict.json
+            grep -q '"objective"' /tmp/predict.json
+            python - <<'PY'
+          import json
+          p=json.load(open('/tmp/predict.json', encoding='utf-8'))
+          assert 0 <= float(p['probability']) <= 1
+          assert p.get('model_version') == 'V5'
+          print(f"verified: {p['objective']} probability={p['probability']}")
+          PY
+            COUNT=$((COUNT+1))
+          done
+          test "$COUNT" = "6"
+          echo "Production smoke passed: model-ready health, demo login, and six live predictions."
