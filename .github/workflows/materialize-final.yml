@@ -1,10 +1,11 @@
-name: Materialize MarketPredict Final
+name: Materialize Lightweight MarketPredict V5
 
 on:
   push:
     branches: [main]
     paths:
       - 'bootstrap/**'
+      - 'requirements-build.txt'
       - '.github/workflows/materialize-final.yml'
   workflow_dispatch:
 
@@ -20,22 +21,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -r requirements.txt
-      - name: Build V5 model and complete project
+      - name: Install build-only ML dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Build exact lightweight V5 runtime
         shell: bash
         run: |
           python - <<'PY'
-          import gzip, hashlib, joblib, shutil, subprocess, sys, tarfile
+          import gzip, hashlib, json, joblib, re, shutil, subprocess, sys, tarfile
           from pathlib import Path
-          ROOT=Path.cwd(); BOOT=ROOT/'bootstrap'; WORK=ROOT/'.v5_materialize'; MODELS=ROOT/'models'; ML=ROOT/'ml'
+          import numpy as np
+          import pandas as pd
+          from catboost import Pool
+
+          ROOT=Path.cwd(); BOOT=ROOT/'bootstrap'; WORK=ROOT/'.v5_materialize'; MODELS=ROOT/'models'; ML=ROOT/'ml'; NATIVE=MODELS/'native'
           EXPECTED='e4fc92bbff264aab4cc3aa67f91c88edddea5d308bbaad33c6e24adb837d15cf'
           FREEZE='5f3874c8a663d329d7e19876e924f44ee09dd0683ac72dc5a017811e05125792'
           objectives=['Sales','Traffic','Awareness','Lead Generation','Engagement','App Installs']
+          def slug(s): return re.sub(r'[^a-z0-9]+','_',s.lower()).strip('_')
+          def jval(x): return x.item() if isinstance(x,np.generic) else x
+
           with tarfile.open(BOOT/'support.tar.gz','r:gz') as tf:
               tf.extractall(ROOT,filter='data')
           generator=gzip.open(BOOT/'generator.py.gz','rt',encoding='utf-8').read()
           trainer=gzip.open(BOOT/'trainer.py.gz','rt',encoding='utf-8').read()
           WORK.mkdir(exist_ok=True); MODELS.mkdir(exist_ok=True); ML.mkdir(exist_ok=True)
+          shutil.rmtree(NATIVE,ignore_errors=True); NATIVE.mkdir(parents=True,exist_ok=True)
           (ML/'generate_saudi_marketing_dataset_v5.py').write_text(generator,encoding='utf-8')
           (ML/'train_v5_stage1.py').write_text(trainer,encoding='utf-8')
           (WORK/'generate.py').write_text(generator.replace("out=Path('/mnt/data')",f"out=Path({str(WORK)!r})"),encoding='utf-8')
@@ -44,27 +54,94 @@ jobs:
           pre=WORK/'saudi_marketing_campaigns_v5_prelaunch.csv'
           got=hashlib.sha256(pre.read_bytes()).hexdigest()
           if got != EXPECTED: raise RuntimeError(f'Dataset SHA mismatch: {got}')
+
           bundles={}
           for obj in objectives:
               subprocess.run([sys.executable,str(WORK/'train.py'),obj],check=True)
               bundles[obj]=joblib.load(WORK/f"v5_model_{obj.replace(' ','_').lower()}.joblib")
-          suite={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'models':bundles,'lockbox_results_file':'lockbox_results.json'}
-          joblib.dump(suite,MODELS/'model_suite.joblib',compress=3)
-          if set(joblib.load(MODELS/'model_suite.joblib')['models']) != set(objectives): raise RuntimeError('Objective mismatch')
+
+          df=pd.read_csv(pre,low_memory=False)
+          df['Start_Date']=pd.to_datetime(df['Start_Date'])
+          df['Start_Month']=df['Start_Date'].dt.month.astype(str)
+          df['Start_Quarter']=df['Start_Date'].dt.quarter.astype(str)
+          df['Start_DayOfWeek']=df['Start_Date'].dt.dayofweek.astype(str)
+
+          meta={'dataset_version':'V5','freeze_manifest_sha256':FREEZE,'lockbox_results_file':'lockbox_results.json','models':{}}
+          for obj,b in bundles.items():
+              sl=slug(obj)
+              lgb_pipe=b['lgb']; prep=lgb_pipe.named_steps['prep']; lgb_model=lgb_pipe.named_steps['model']
+              txt=WORK/f'{sl}_lgb.txt'; lgb_model.booster_.save_model(str(txt))
+              lgb_gz=NATIVE/f'{sl}_lgb.txt.gz'
+              with txt.open('rt',encoding='utf-8') as inp, gzip.open(lgb_gz,'wt',encoding='utf-8',compresslevel=9) as out:
+                  shutil.copyfileobj(inp,out)
+
+              num_cols=list(prep.transformers_[0][2]); num_imp=prep.transformers_[0][1]
+              cat_cols=list(prep.transformers_[1][2]); cat_pipe=prep.transformers_[1][1]
+              cat_imp=cat_pipe.named_steps['imp']; ohe=cat_pipe.named_steps['ohe']
+              catinfo=b['cat']
+
+              sub=df[df['Campaign_Objective']==obj]
+              X=sub[b['features']].copy()
+              for c in catinfo['num']:
+                  X[c]=pd.to_numeric(X[c],errors='coerce').fillna(catinfo['med'][c]).astype(float)
+              for c in catinfo['cat']:
+                  X[c]=X[c].fillna('__MISSING__').astype(str)
+              pool=Pool(X,cat_features=[X.columns.get_loc(c) for c in catinfo['cat']])
+              cpp=WORK/f'{sl}_cat.cpp'; so=NATIVE/f'{sl}_cat.so'
+              catinfo['model'].save_model(str(cpp),format='cpp',pool=pool)
+              with cpp.open('a',encoding='utf-8') as f:
+                  f.write('\nextern "C" double cat_predict(const double* float_features, const char** cat_features) {\n')
+                  f.write(f'    std::vector<float> f({len(catinfo["num"])});\n    for (int i=0;i<{len(catinfo["num"])};++i) f[i] = static_cast<float>(float_features[i]);\n')
+                  f.write(f'    std::vector<std::string> c({len(catinfo["cat"])});\n    for (int i=0;i<{len(catinfo["cat"])};++i) c[i] = cat_features[i] ? std::string(cat_features[i]) : std::string("__MISSING__");\n')
+                  f.write('    return ApplyCatboostModel(f,c);\n}\n')
+              subprocess.run(['g++','-O3','-std=c++17','-shared','-fPIC',str(cpp),'-o',str(so)],check=True)
+
+              meta['models'][obj]={
+                  'objective':obj,'features':list(b['features']),'weight_lgb':float(b['weight_lgb']),'threshold':float(b['threshold']),
+                  'calibrator_coef':float(b['calibrator'].coef_[0,0]),'calibrator_intercept':float(b['calibrator'].intercept_[0]),
+                  'lgb_model_file':lgb_gz.name,'lgb_num_cols':num_cols,
+                  'lgb_num_medians':{c:float(v) for c,v in zip(num_cols,num_imp.statistics_)},
+                  'lgb_cat_cols':cat_cols,'lgb_cat_fill':{c:jval(v) for c,v in zip(cat_cols,cat_imp.statistics_)},
+                  'lgb_cat_categories':{c:[jval(v) for v in cats.tolist()] for c,cats in zip(cat_cols,ohe.categories_)},
+                  'cat_model_file':f'{sl}_cat.cbm','cat_cols':list(catinfo['cat']),'cat_num_cols':list(catinfo['num']),
+                  'cat_medians':{k:float(v) for k,v in catinfo['med'].items()},'lgb_config':b.get('lgb_config',{}),'cat_config':b.get('cat_config',{}),
+              }
+
+          (MODELS/'portable_suite.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
+          (MODELS/'model_suite.joblib').unlink(missing_ok=True)
           shutil.rmtree(WORK,ignore_errors=True)
-          print('Materialized model suite bytes:',(MODELS/'model_suite.joblib').stat().st_size)
+          print('Portable objectives:',list(meta['models']))
+          print('Native runtime bytes:',sum(p.stat().st_size for p in NATIVE.iterdir()))
           PY
-      - run: python -m pip install pytest httpx
-      - name: Run website tests
-        run: |
-          python -c "import app; print(app.predictor.suite['dataset_version'], len(app.predictor.models))"
-          pytest -q
-      - name: Publish final repository shape
+      - name: Verify exact V5 predictions and website tests
         shell: bash
         run: |
-          rm -rf bootstrap .github/workflows/materialize-v5.yml .github/workflows/materialize-final.yml
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from predictor import CampaignPredictor
+          p=CampaignPredictor()
+          expected={
+            'sales':0.847463662545703,
+            'traffic':0.9068487747981772,
+            'awareness':0.5849833340435442,
+            'lead_generation':0.5958927644904168,
+            'engagement':0.2224554720794967,
+            'app_installs':0.15060817694830667,
+          }
+          for name,target in expected.items():
+              payload=json.loads(Path(f'sample_payloads/{name}.json').read_text(encoding='utf-8'))
+              got=p.predict(payload).probability
+              print(name,got,target,abs(got-target))
+              if abs(got-target)>1e-12: raise RuntimeError(f'Prediction mismatch for {name}: {got} != {target}')
+          PY
+          pytest -q
+      - name: Publish lightweight production repository
+        shell: bash
+        run: |
+          rm -rf bootstrap .v5_materialize requirements-build.txt .github/workflows/materialize-final.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Materialize complete MarketPredict V5 project [materialized]"
+          git commit -m "Materialize lightweight MarketPredict V5 runtime [materialized]"
           git push
