@@ -79,3 +79,26 @@ def test_evidence_overrides_numeric_score_server_side():
     response = client.post("/api/predict", json=payload)
     assert response.status_code == 200, response.text
     assert 0 <= response.json()["probability"] <= 1
+
+
+def test_batch_csv_upload_renders_six_real_predictions():
+    demo_login()
+    page = client.get("/batch")
+    assert page.status_code == 200
+    assert "تحليل ملف الحملات" in page.text
+    token = csrf(page.text)
+    csv_bytes = (ROOT / "sample_payloads" / "campaign_validation_6.csv").read_bytes()
+    response = client.post(
+        "/batch",
+        data={"_csrf": token},
+        files={"file": ("campaign_validation_6.csv", csv_bytes, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    assert "100.0%" in response.text
+    assert "97.2%" in response.text
+    assert "96.7%" in response.text
+    assert "93.5%" in response.text
+    assert "13.8%" in response.text
+    assert "8.1%" in response.text
+    assert "4.2%" in response.text
+    assert response.text.count("صحيح ✓") == 6
