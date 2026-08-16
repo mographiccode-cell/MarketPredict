@@ -1,0 +1,65 @@
+{% extends 'base.html' %}{% block title %}تحليل ملف الحملات{% endblock %}{% block content %}
+<section class="page-shell app-page">
+  <div class="page-head">
+    <div>
+      <span class="eyebrow">CSV Batch Prediction</span>
+      <h1>حلّل عدة حملات دفعة واحدة</h1>
+      <p>ارفع ملف CSV يحتوي بيانات الحملات قبل الإطلاق. يعالج النظام كل صف بشكل مستقل ويعرض احتمال النجاح ومقارنته بالنتيجة الفعلية إذا كان العمود <bdi>Actual_Result</bdi> موجودًا.</p>
+    </div>
+    <a class="btn btn-secondary" href="/batch/sample.csv">تنزيل ملف الاختبار الجاهز</a>
+  </div>
+
+  <section class="panel panel-lg">
+    <div class="panel-head">
+      <div><span class="eyebrow">Upload</span><h2>رفع ملف CSV</h2></div>
+      <span class="badge">حتى 200 حملة / 2MB</span>
+    </div>
+    {% if upload_error %}<div class="flash error">{{ upload_error }}</div>{% endif %}
+    <form method="post" enctype="multipart/form-data" class="batch-upload-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label class="upload-zone">
+        <strong>اختر ملف الحملات CSV</strong>
+        <span>UTF-8 · صف واحد لكل حملة · يمكن إضافة Campaign_Name و Actual_Result</span>
+        <input type="file" name="file" accept=".csv,text/csv" required>
+      </label>
+      <button class="btn btn-primary" type="submit">تحليل الملف الآن</button>
+    </form>
+  </section>
+
+  {% if summary %}
+  <div class="metrics-grid batch-metrics">
+    <article class="metric-card"><span>الحملات المقروءة</span><strong>{{ summary.total }}</strong><small>{{ summary.valid }} صالحة للتنبؤ</small></article>
+    <article class="metric-card"><span>نجاح مرجح</span><strong>{{ summary.predicted_successes }}</strong><small>حسب Threshold كل مودل</small></article>
+    <article class="metric-card"><span>فشل مرجح</span><strong>{{ summary.predicted_failures }}</strong><small>من الحملات الصالحة</small></article>
+    <article class="metric-card accent"><span>دقة اختبار السيناريو</span><strong>{% if summary.accuracy is not none %}{{ '%.1f'|format(summary.accuracy*100) }}%{% else %}-{% endif %}</strong><small>{{ summary.correct }}/{{ summary.labeled }} تطابق مع Actual_Result</small></article>
+  </div>
+
+  <section class="panel panel-lg">
+    <div class="panel-head">
+      <div><span class="eyebrow">Results</span><h2>نتائج {{ uploaded_filename or 'الملف' }}</h2></div>
+      <span class="badge {{ 'ok' if summary.errors == 0 else 'bad' }}">{{ 'كل الصفوف تمت معالجتها' if summary.errors == 0 else summary.errors ~ ' صف به خطأ' }}</span>
+    </div>
+    <div class="table-wrap batch-table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>الحملة</th><th>الهدف</th><th>النتيجة الفعلية</th><th>تنبؤ المودل</th><th>احتمال النجاح</th><th>الثقة</th><th>التطابق</th></tr></thead>
+        <tbody>
+        {% for r in results %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td><b>{{ r.campaign_name }}</b>{% if r.notes %}<small class="table-note">{{ r.notes }}</small>{% endif %}</td>
+            <td>{{ objective_ar.get(r.objective, r.objective) }}</td>
+            <td><span class="badge {{ 'ok' if r.actual is sameas true else 'bad' if r.actual is sameas false else '' }}">{{ r.actual_text }}</span></td>
+            <td>{% if r.error %}<span class="badge bad">خطأ</span><small class="table-note">{{ r.error }}</small>{% else %}<span class="badge {{ 'ok' if r.predicted_success else 'bad' }}">{{ r.predicted_text }}</span>{% endif %}</td>
+            <td>{% if r.probability is not none %}<b>{{ '%.1f'|format(r.probability*100) }}%</b><small class="table-note">Threshold {{ '%.1f'|format(r.threshold*100) }}%</small>{% else %}-{% endif %}</td>
+            <td>{{ r.confidence_label }}</td>
+            <td>{% if r.correct is sameas true %}<span class="badge ok">صحيح ✓</span>{% elif r.correct is sameas false %}<span class="badge bad">غير صحيح ✕</span>{% else %}-{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <p class="form-note">دقة اختبار السيناريو هنا تقيس تطابق المودل مع التسميات الموجودة في هذا الملف فقط، وليست بديلًا عن دقة الـ Lockbox أو اختبار خارجي واسع.</p>
+  {% endif %}
+</section>
+{% endblock %}
