@@ -20,8 +20,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest httpx
       - name: Python syntax check
-        run: python -m py_compile app.py marketpredict_app.py predictor.py assessment.py db.py auth.py
+        run: python -m py_compile app.py marketpredict_app.py predictor.py assessment.py batch_routes.py db.py auth.py
       - name: JavaScript syntax check
         run: node --check static/app.js
       - name: Run automated tests
         run: pytest -q
+      - name: Run six-campaign CSV validation
+        run: python scripts/validate_campaign_csv.py
+      - name: Upload campaign validation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-validation-results
+          path: |
+            artifacts/campaign_validation_results.csv
+            artifacts/campaign_validation_results.json
